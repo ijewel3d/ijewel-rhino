@@ -1,0 +1,29 @@
+name: iJewelViewer
+version: 0.1.18
+authors:
+  - iJewel3D
+description: |
+  iJewel Viewer is a Rhino plugin designed specifically for 3D jewelry designers. It enhances the workflow for designers to interact and share their intricate jewelry models with their clients and fellow designers.
+  Key Features:
+  1.Experience seamless viewing of your 3D jewelry models directly within Rhino.
+  2.Export your Rhino models directly to the iJewel Viewer.
+  3.Provides different options within the viewer to rotate, zoom, and pan around your imported 3D model.
+  4.Create and customize your own configurator using a predefined set of metal and gem libraries, applying selected materials to your models according to your preferences.
+  5.Enhance your models further by applying different metal and gem environment maps available from the library.
+  6.Adjust advanced settings like environment rotation and intensity to achieve the perfect look for your designs.
+  7.Share your creations with clients, allowing them to view and interact with your designs in real-time, thereby providing an engaging experience.
+
+  We provide extensive tutorials and resources to help you get the most out of our tool:
+  - Comprehensive Documentation: https://drive.google.com/file/d/1x-akxCNYMBeObWB44w75tarje8yH1kjq/view
+  - Step-by-Step Video Tutorial: https://www.youtube.com/playlist?list=PLIWKi7kUUJPhTkW5fIgk3j3kJNWlJopei
+url: "https://www.ijewel3d.com/products/ijewel-design"
+icon: icon.png
+keywords:
+  - export
+  - share
+  - link
+  - copy
+  - download
+  - ijewel3d
+  - ijewel
+  - ijewelviewer
