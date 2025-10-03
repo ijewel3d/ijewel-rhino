@@ -349,6 +349,12 @@ namespace Ijewel3D
                 return;
             }
 
+            if (context.Request.Url.AbsolutePath.Equals("/who_am_i", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleWhoAmI(context);
+                return;
+            }
+
             string filename = Path.GetFileName(context.Request.Url.AbsolutePath);
             string path = Path.Combine(IJewelViewer.BaseDirectory, filename);
 
@@ -425,6 +431,32 @@ namespace Ijewel3D
             context.Response.ContentLength64 = responseBytes.Length;
             context.Response.OutputStream.Write(responseBytes, 0, responseBytes.Length);
             context.Response.Close();
+        }
+
+        private static void HandleWhoAmI(HttpListenerContext context)
+        {
+            try
+            {
+                AddCorsHeaders(context.Response);
+
+                var pluginGuid = Ijewel3DPlugin.Instance?.Id ?? Guid.Empty;
+                var text = pluginGuid == Guid.Empty ? "" : pluginGuid.ToString("D");
+                var bytes = System.Text.Encoding.UTF8.GetBytes(text);
+
+                context.Response.StatusCode = (int)HttpStatusCode.OK;
+                context.Response.ContentType = "text/plain";
+                context.Response.ContentLength64 = bytes.Length;
+                context.Response.OutputStream.Write(bytes, 0, bytes.Length);
+            }
+            catch (Exception ex)
+            {
+                Rhino.RhinoApp.WriteLine($"who_am_i error: {ex.Message}");
+                context.Response.StatusCode = (int)HttpStatusCode.InternalServerError;
+            }
+            finally
+            {
+                context.Response.Close();
+            }
         }
 
     }
@@ -610,4 +642,5 @@ namespace Ijewel3D
             _modelHasChanged = false;
         }
     }
+    
 }
