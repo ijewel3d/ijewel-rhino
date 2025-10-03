@@ -439,7 +439,7 @@ namespace Ijewel3D
             {
                 AddCorsHeaders(context.Response);
 
-                var pluginGuid = Ijewel3DPlugin.Instance?.Id ?? Guid.Empty;
+                var pluginGuid = Ijewel3DPlugin.Instance?.Id ?? Guid.Empty; //replace this with your guid
                 var text = pluginGuid == Guid.Empty ? "" : pluginGuid.ToString("D");
                 var bytes = System.Text.Encoding.UTF8.GetBytes(text);
 
