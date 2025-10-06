@@ -8,22 +8,20 @@ using System.Net;
 using System.Net.NetworkInformation;
 using System.Threading;
 using System.Reflection;
-using System.Net.Http;
+
 using System.Net.Sockets;
 using System.Diagnostics;
 using System.Collections.Generic;
+
+
 
 namespace Ijewel3D
 {
     public class IJewelViewer : Rhino.Commands.Command
     {
-        private static HttpListener _listener;
         public static string BaseDirectory;
-        private const int Port = 8469;
-        private const int HttpsPort = 8443;
-        private static Thread _serverThread;
-        private static readonly HttpClient httpClient = new HttpClient();
-        private static CancellationTokenSource _cancellationTokenSource;
+
+        protected ServerUtility serverUtility;
 
         private static readonly string[] reliableHosts = {
             "www.cloudflare.com",
@@ -37,8 +35,9 @@ namespace Ijewel3D
         public IJewelViewer()
         {
             Instance = this;
-            var obs = RhinoModelObserver.Instance;
+            RhinoModelObserver.Instance.ToString();
             InitializeBaseDirectory();
+            serverUtility = new ServerUtility();
         }
 
         private void InitializeBaseDirectory()
@@ -57,61 +56,6 @@ namespace Ijewel3D
 
         public override string EnglishName => "IJewelViewer";
 
-        private bool IsPortInUse(int port)
-        {
-            TcpListener tcpListener = null;
-            try
-            {
-                tcpListener = new TcpListener(IPAddress.Loopback, port);
-                tcpListener.Start();
-                return false;
-            }
-            catch
-            {
-                return true;
-            }
-            finally
-            {
-                tcpListener?.Stop();
-            }
-        }
-
-        protected void StartFileServer()
-        {
-            if (IsPortInUse(Port))
-            {
-                RhinoApp.WriteLine($"Server already running on port {Port}");
-                return;
-            }
-
-            _listener = new HttpListener();
-            _listener.Prefixes.Add($"http://localhost:{Port}/");
-            //_listener.Prefixes.Add($"https://*:{HttpsPort}/");
-            _listener.Start();
-
-            _cancellationTokenSource = new CancellationTokenSource();
-            _serverThread = new Thread(() => ServerUtility.ServerThreadStart(_listener, _cancellationTokenSource.Token));
-            _serverThread.Start();
-            RhinoApp.WriteLine($"Started new server on port {Port}");
-        }
-
-        public void StopFileServer()
-        {
-            if (_listener != null && _listener.IsListening)
-            {
-                _listener.Stop();
-                _listener.Close();
-            }
-
-            if (_cancellationTokenSource != null)
-            {
-                _cancellationTokenSource.Cancel();
-                _serverThread?.Join();
-                _cancellationTokenSource.Dispose();
-                _cancellationTokenSource = null;
-            }
-        }
-
         protected override Result RunCommand(RhinoDoc doc, RunMode mode)
         {
             try
@@ -129,10 +73,16 @@ namespace Ijewel3D
                 RhinoApp.WriteLine("Starting IJewelViewer...");
 
                 // Only start server if one isn't already running
-                StartFileServer();
+                serverUtility.StartFileServer();
+
+                if (serverUtility.chosenPort == null)
+                {
+                    RhinoApp.WriteLine("Error: No free port found.");
+                    return Result.Failure;
+                }
 
                 RhinoApp.WriteLine("Exporting model...");
-                ExportModel(doc);
+                ExportModel(doc, (int)serverUtility.chosenPort);
 
                 string uri = "https://ijewel.design/rhinoceros";
 
@@ -141,7 +91,7 @@ namespace Ijewel3D
                     if (!BrowserLauncher.LaunchBrowserInMac(uri))
                     {
                         //launch webview if none of the supported browsers are available on mac
-                        var webViewForm = new WebViewForm(uri);
+                        var webViewForm = new WebViewForm(uri, serverUtility);
                         webViewForm.Show();
                     }
 
@@ -150,7 +100,7 @@ namespace Ijewel3D
                 {
 
                     //use webview directly on windows
-                    var webViewForm = new WebViewForm(uri);
+                    var webViewForm = new WebViewForm(uri, serverUtility);
                     webViewForm.Show();
 
                 }
@@ -218,12 +168,12 @@ namespace Ijewel3D
             RhinoApp.InvokeOnUiThread(showDialog);
         }
 
-        public static void ExportModel(RhinoDoc doc)
+        public static void ExportModel(RhinoDoc doc, int port)
         {
             try
             {
                 Directory.CreateDirectory(BaseDirectory);
-                string fullPath = Path.Combine(BaseDirectory, "model.3dm");
+                string fullPath = Path.Combine(BaseDirectory, $"model{port}.3dm");
 
                 if (!doc.Export(fullPath))
                 {
@@ -244,16 +194,21 @@ namespace Ijewel3D
     class WebViewForm : Form
     {
         private readonly WebView webView;
+        private readonly ServerUtility serverUtility;
 
-        public WebViewForm(string uri)
+        public WebViewForm(string uri, ServerUtility serverUtility)
         {
+            this.serverUtility = serverUtility;
             Title = "iJewel3D";
             WindowState = WindowState.Maximized;
             MinimumSize = new Eto.Drawing.Size(800, 600);
 
+            //add port to search params
+            uri += "?p=" + (serverUtility.chosenPort ?? serverUtility.DEFAULT_FALLBACK_PORT);
+
             webView = new WebView
             {
-                Url = new Uri("https://ijewel.design/rhinoceros")
+                Url = new Uri(uri)
             };
 
             Content = webView;
@@ -268,9 +223,9 @@ namespace Ijewel3D
             {
                 // Clean up WebView resources
                 webView?.Dispose();
-                
+
                 // Stop the file server
-                IJewelViewer.Instance?.StopFileServer();
+                serverUtility.StopFileServer();
             }
             catch (Exception ex)
             {
@@ -279,10 +234,99 @@ namespace Ijewel3D
         }
     }
 
-    static class ServerUtility
+    public class ServerUtility
     {
 
-        private static Dictionary<string, string> ParseQueryString(string query)
+        public int? chosenPort = null;
+        private readonly int[] CandidatePorts;
+        private HttpListener _listener;
+        private CancellationTokenSource _cancellationTokenSource;
+        private Thread _serverThread;
+        public int DEFAULT_FALLBACK_PORT = 8469;
+
+
+        public ServerUtility()
+        {
+            CandidatePorts = BuildPortList(8469, 30); // 8469..8498
+            chosenPort = FindFreePort();
+        }
+
+        private int[] BuildPortList(int start, int count)
+        {
+            var list = new List<int>(count);
+            for (int i = 0; i < count; i++) list.Add(start + i);
+            return list.ToArray();
+        }
+
+        public int? FindFreePort()
+        {
+            foreach (var p in CandidatePorts)
+            {
+                if (!IsPortInUse(p)) return p;
+            }
+
+            return null;
+        }
+
+        public bool IsPortInUse(int port)
+        {
+            TcpListener tcpListener = null;
+            try
+            {
+                tcpListener = new TcpListener(IPAddress.Loopback, port);
+                tcpListener.Start();
+                return false;
+            }
+            catch
+            {
+                return true;
+            }
+            finally
+            {
+                tcpListener?.Stop();
+            }
+        }
+
+        public void StartFileServer()
+        {
+            if (_listener != null && _listener.IsListening) return;
+
+            chosenPort = chosenPort ?? FindFreePort();
+            if (chosenPort == null)
+            {
+                RhinoApp.WriteLine($"No free ports available. Aborting");
+                return;
+            }
+
+            _listener = new HttpListener();
+            _listener.Prefixes.Add($"http://localhost:{chosenPort}/");
+            _listener.Start();
+
+            _cancellationTokenSource = new CancellationTokenSource();
+            _serverThread = new Thread(() => ServerThreadStart(_listener, _cancellationTokenSource.Token));
+            _serverThread.Start();
+            RhinoApp.WriteLine($"Started new server on port {chosenPort}");
+        }
+
+        public void StopFileServer()
+        {
+            if (_listener != null && _listener.IsListening)
+            {
+                _listener.Stop();
+                _listener.Close();
+            }
+
+            if (_cancellationTokenSource != null)
+            {
+                _cancellationTokenSource.Cancel();
+                _serverThread?.Join();
+                _cancellationTokenSource.Dispose();
+                _cancellationTokenSource = null;
+            }
+        }
+
+
+        private Dictionary<string, string> ParseQueryString(string query)
         {
             var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -308,7 +352,7 @@ namespace Ijewel3D
             return result;
         }
 
-        public static void ServerThreadStart(HttpListener listener, CancellationToken cancellationToken)
+        public void ServerThreadStart(HttpListener listener, CancellationToken cancellationToken)
         {
             try
             {
@@ -332,7 +376,7 @@ namespace Ijewel3D
             }
         }
 
-        private static void ProcessRequest(HttpListenerContext context)
+        private void ProcessRequest(HttpListenerContext context)
         {
             // Handle CORS preflight
             if (context.Request.HttpMethod == "OPTIONS")
@@ -370,7 +414,7 @@ namespace Ijewel3D
             }
         }
 
-        private static void ServeFile(HttpListenerContext context, string path)
+        private void ServeFile(HttpListenerContext context, string path)
         {
             try
             {
@@ -391,7 +435,7 @@ namespace Ijewel3D
             }
         }
 
-        private static void AddCorsHeaders(HttpListenerResponse response)
+        private void AddCorsHeaders(HttpListenerResponse response)
         {
             response.AddHeader("Access-Control-Allow-Origin", "*");
             response.AddHeader("Access-Control-Allow-Methods", "*");
@@ -399,7 +443,7 @@ namespace Ijewel3D
             response.AddHeader("Access-Control-Max-Age", "86400");
         }
 
-        private static void HandleHasChangedEndpoint(HttpListenerContext context)
+        private void HandleHasChangedEndpoint(HttpListenerContext context)
         {
             AddCorsHeaders(context.Response);
 
@@ -410,11 +454,16 @@ namespace Ijewel3D
             bool force = parsed.ContainsKey("force");
 
             bool hasChanged = RhinoModelObserver.Instance.ModelHasChanged;
-            if(hasChanged || force)
+            if (hasChanged || force)
             {
                 lock (RhinoModelObserver.hasChangedLock)
                 {
-                    IJewelViewer.ExportModel(Rhino.RhinoDoc.ActiveDoc);
+                    if (chosenPort == null)
+                    {
+                        return;
+                    }
+                    
+                    IJewelViewer.ExportModel(RhinoDoc.ActiveDoc, (int)chosenPort);
                     if (hasChanged)
                     {
                         RhinoModelObserver.Instance.ResetModelChangedFlag();
@@ -433,7 +482,7 @@ namespace Ijewel3D
             context.Response.Close();
         }
 
-        private static void HandleWhoAmI(HttpListenerContext context)
+        private void HandleWhoAmI(HttpListenerContext context)
         {
             try
             {
@@ -450,7 +499,7 @@ namespace Ijewel3D
             }
             catch (Exception ex)
             {
-                Rhino.RhinoApp.WriteLine($"who_am_i error: {ex.Message}");
+                RhinoApp.WriteLine($"who_am_i error: {ex.Message}");
                 context.Response.StatusCode = (int)HttpStatusCode.InternalServerError;
             }
             finally
@@ -486,14 +535,22 @@ namespace Ijewel3D
                 RhinoApp.WriteLine("Internet connection verified.");
                 RhinoApp.WriteLine("Starting iJewel client...");
 
-                ExportModel(doc);
 
 
                 RhinoModelObserver obs = RhinoModelObserver.Instance;
                 obs.ModelHasChanged = true;
 
                 // Only start server if one isn't already running
-                StartFileServer();
+                serverUtility.StartFileServer();
+
+                if (serverUtility.chosenPort == null)
+                {
+                    RhinoApp.WriteLine("Error: No free port found.");
+                    return Result.Failure;
+                }
+
+                ExportModel(doc, (int)serverUtility.chosenPort);
+
                 return Result.Success;
             }
             catch (Exception ex)
@@ -642,5 +699,5 @@ namespace Ijewel3D
             _modelHasChanged = false;
         }
     }
-    
+
 }
