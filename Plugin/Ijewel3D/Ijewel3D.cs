@@ -1,17 +1,17 @@
-﻿using Rhino;
+﻿using Eto.Forms;
+using Rhino;
 using Rhino.Commands;
+using Rhino.DocObjects;
 using Rhino.UI;
-using Eto.Forms;
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.NetworkInformation;
-using System.Threading;
-using System.Reflection;
-
 using System.Net.Sockets;
-using System.Diagnostics;
-using System.Collections.Generic;
+using System.Reflection;
+using System.Threading;
 
 
 
@@ -238,31 +238,19 @@ namespace Ijewel3D
     {
 
         public int? chosenPort = null;
-        private readonly int[] CandidatePorts;
         private HttpListener _listener;
         private CancellationTokenSource _cancellationTokenSource;
         private Thread _serverThread;
         public int DEFAULT_FALLBACK_PORT = 8469;
 
-
-        public ServerUtility()
-        {
-            CandidatePorts = BuildPortList(8469, 30); // 8469..8498
-            chosenPort = FindFreePort();
-        }
-
-        private int[] BuildPortList(int start, int count)
-        {
-            var list = new List<int>(count);
-            for (int i = 0; i < count; i++) list.Add(start + i);
-            return list.ToArray();
-        }
-
         public int? FindFreePort()
         {
-            foreach (var p in CandidatePorts)
+            for (int p = DEFAULT_FALLBACK_PORT; p < DEFAULT_FALLBACK_PORT + 30; p++) 
             {
-                if (!IsPortInUse(p)) return p;
+                if (!IsPortInUse(p)) 
+                {
+                    return p;
+                }
             }
 
             return null;
