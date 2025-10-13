@@ -175,6 +175,8 @@ namespace Ijewel3D
                 Directory.CreateDirectory(BaseDirectory);
                 string fullPath = Path.Combine(BaseDirectory, $"model{port}.3dm");
 
+                RhinoObject.GetRenderMeshes(RhinoDoc.ActiveDoc.Objects.GetObjectList(ObjectType.AnyObject), true, false);
+
                 if (!doc.Export(fullPath))
                 {
                     RhinoApp.WriteLine("Export failed.");
