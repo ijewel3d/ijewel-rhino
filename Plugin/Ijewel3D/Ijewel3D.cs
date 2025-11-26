@@ -12,6 +12,7 @@ using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Threading;
+using System.Net.Http;
 
 
 
@@ -23,14 +24,7 @@ namespace Ijewel3D
 
         protected ServerUtility serverUtility;
 
-        private static readonly string[] reliableHosts = {
-            "www.cloudflare.com",
-            "www.amazon.com",
-            "www.google.com",
-            "www.apple.com",
-            "1.1.1.1",
-            "8.8.8.8"
-        };
+
 
         public IJewelViewer()
         {
@@ -62,11 +56,10 @@ namespace Ijewel3D
             {
                 RhinoApp.WriteLine("Checking internet connectivity...");
 
-                if (!CheckInternetConnectivity())
+                if (!serverUtility.CheckInternetConnectivity())
                 {
                     RhinoApp.WriteLine("Error: No internet connection detected.");
                     ShowNoInternetDialog();
-                    return Result.Failure;
                 }
 
                 RhinoApp.WriteLine("Internet connection verified.");
@@ -115,57 +108,15 @@ namespace Ijewel3D
             }
         }
 
-        protected bool CheckInternetConnectivity()
-        {
-            try
-            {
-                if (!NetworkInterface.GetIsNetworkAvailable())
-                {
-                    return false;
-                }
-
-                using (var ping = new Ping())
-                {
-                    foreach (string host in reliableHosts)
-                    {
-                        try
-                        {
-                            PingReply reply = ping.Send(host, 3000);
-                            if (reply?.Status == IPStatus.Success)
-                            {
-                                return true;
-                            }
-                        }
-                        catch
-                        {
-                            continue;
-                        }
-                    }
-                }
-
-                return false;
-            }
-            catch (Exception ex)
-            {
-                RhinoApp.WriteLine($"Error checking internet connectivity: {ex.Message}");
-                return false;
-            }
-        }
-
         protected void ShowNoInternetDialog()
         {
-            Action showDialog = delegate
-            {
-                Dialogs.ShowMessage(
-                    "This command requires an internet connection to function properly. " +
-                    "Please check your internet connection and try again.",
-                    "No Internet Connection",
-                    ShowMessageButton.OK,
-                    ShowMessageIcon.Warning
-                );
-            };
-
-            RhinoApp.InvokeOnUiThread(showDialog);
+            Dialogs.ShowMessage(
+                "iJewel requires an internet connection to function properly. " +
+                "Please check your internet connection and try again.",
+                "No Internet Connection",
+                ShowMessageButton.OK,
+                ShowMessageIcon.Warning
+            );
         }
 
         public static void ExportModel(RhinoDoc doc, int port)
@@ -238,6 +189,7 @@ namespace Ijewel3D
 
     public class ServerUtility
     {
+        private static readonly HttpClient _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
 
         public int? chosenPort = null;
         private HttpListener _listener;
@@ -495,6 +447,22 @@ namespace Ijewel3D
             finally
             {
                 context.Response.Close();
+            }
+        }
+
+        public bool CheckInternetConnectivity()
+        {
+            try
+            {
+                if (!NetworkInterface.GetIsNetworkAvailable()) return false;
+                using (var response = _httpClient.GetAsync("http://google.com/generate_204").Result)
+                {
+                    return response.IsSuccessStatusCode;
+                }
+            }
+            catch
+            {
+                return false;
             }
         }
 
