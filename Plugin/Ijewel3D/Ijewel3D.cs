@@ -455,7 +455,7 @@ namespace Ijewel3D
             try
             {
                 if (!NetworkInterface.GetIsNetworkAvailable()) return false;
-                using (var response = _httpClient.GetAsync("http://clients3.google.com/generate_204").Result)
+                using (var response = _httpClient.GetAsync("http://google.com/generate_204").Result)
                 {
                     return response.IsSuccessStatusCode;
                 }
