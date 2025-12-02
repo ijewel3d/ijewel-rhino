@@ -81,7 +81,7 @@ namespace Ijewel3D
 
                 if (Rhino.Runtime.HostUtils.RunningOnOSX)
                 {
-                    if (!BrowserLauncher.LaunchBrowserInMac(uri))
+                    if (!BrowserLauncher.LaunchBrowser(uri, (int)serverUtility.chosenPort))
                     {
                         //launch webview if none of the supported browsers are available on mac
                         var webViewForm = new WebViewForm(uri, serverUtility);
@@ -156,8 +156,15 @@ namespace Ijewel3D
             WindowState = WindowState.Maximized;
             MinimumSize = new Eto.Drawing.Size(800, 600);
 
-            //add port to search params
-            uri += "?p=" + (serverUtility.chosenPort ?? serverUtility.DEFAULT_FALLBACK_PORT);
+            //handle if the uri has some query params
+            if (uri.Contains("?"))
+            {
+                uri += "&p=" + (serverUtility.chosenPort ?? serverUtility.DEFAULT_FALLBACK_PORT);
+            }
+            else
+            {
+                uri += "?p=" + (serverUtility.chosenPort ?? serverUtility.DEFAULT_FALLBACK_PORT);
+            }
 
             webView = new WebView
             {
@@ -473,9 +480,9 @@ namespace Ijewel3D
         public override string EnglishName => "IJewelDesign";
     }
 
-    public class IJewel : IJewelViewer
+    public class IJewelPlayground : IJewelViewer
     {
-        public override string EnglishName => "IJewel";
+        public override string EnglishName => "IJewelPlayground";
 
         protected override Result RunCommand(RhinoDoc doc, RunMode mode)
         {
@@ -483,7 +490,7 @@ namespace Ijewel3D
             {
                 RhinoApp.WriteLine("Checking internet connectivity...");
 
-                if (!CheckInternetConnectivity())
+                if (!serverUtility.CheckInternetConnectivity())
                 {
                     RhinoApp.WriteLine("Error: No internet connection detected.");
                     ShowNoInternetDialog();
@@ -509,6 +516,13 @@ namespace Ijewel3D
 
                 ExportModel(doc, (int)serverUtility.chosenPort);
 
+                string uri = "https://playground.ijewel3d.com/v2/?rhino";
+                if (!BrowserLauncher.LaunchBrowser(uri , (int)serverUtility.chosenPort))
+                {
+                    var webViewForm = new WebViewForm(uri, serverUtility);
+                    webViewForm.Show();
+                }
+
                 return Result.Success;
             }
             catch (Exception ex)
@@ -523,52 +537,72 @@ namespace Ijewel3D
 
     public static class BrowserLauncher
     {
-        public static bool LaunchBrowserInMac(string link)
+        public static bool LaunchBrowser(string link , int port)
         {
             if (string.IsNullOrEmpty(link))
                 return false;
 
-            var launchAttempts = new List<ProcessStartInfo>
+            if(link.Contains("?"))
             {
-                // 1) Open Chrome via 'open -a "Google Chrome"'
-                new ProcessStartInfo{
-                    FileName = "open",
-                    Arguments = $"-na \"Google Chrome\" --args --new-window \"{link}\"",
-                    UseShellExecute = false
-                },
-                // 2) full path to Chrome in .app
-                new ProcessStartInfo{
-                    FileName = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-                    Arguments = link,
-                    UseShellExecute = false
-                },
+                link += "&p=" + port;
+            }
+            else
+            {
+                link += "?p=" + port;
+            }
 
-                // Firefox
-                new ProcessStartInfo{
-                    FileName = "open",
-                    Arguments = $"-a \"Firefox\" \"{link}\"",
-                    UseShellExecute = false
-                },
-                new ProcessStartInfo
-                {
-                    FileName = "/Applications/Firefox.app/Contents/MacOS/firefox",
-                    Arguments = link,
-                    UseShellExecute = false
-                },
+            List<ProcessStartInfo> launchAttempts;
 
-                // Opera
-                new ProcessStartInfo{
-                    FileName = "open",
-                    Arguments = $"-a \"Opera\" \"{link}\"",
-                    UseShellExecute = false
-                },
-                new ProcessStartInfo
+            if (Rhino.Runtime.HostUtils.RunningOnOSX)
+            {
+                launchAttempts = new List<ProcessStartInfo>
                 {
-                    FileName = "/Applications/Opera.app/Contents/MacOS/Opera",
-                    Arguments = link,
-                    UseShellExecute = false
-                }
-            };
+                    new ProcessStartInfo{
+                        FileName = "open",
+                        Arguments = $"-na \"Google Chrome\" --args --new-window \"{link}\"",
+                        UseShellExecute = false
+                    },
+                    new ProcessStartInfo{
+                        FileName = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                        Arguments = link,
+                        UseShellExecute = false
+                    },
+                    new ProcessStartInfo{
+                        FileName = "open",
+                        Arguments = $"-a \"Firefox\" \"{link}\"",
+                        UseShellExecute = false
+                    },
+                    new ProcessStartInfo
+                    {
+                        FileName = "/Applications/Firefox.app/Contents/MacOS/firefox",
+                        Arguments = link,
+                        UseShellExecute = false
+                    },
+                    new ProcessStartInfo{
+                        FileName = "open",
+                        Arguments = $"-a \"Opera\" \"{link}\"",
+                        UseShellExecute = false
+                    },
+                    new ProcessStartInfo
+                    {
+                        FileName = "/Applications/Opera.app/Contents/MacOS/Opera",
+                        Arguments = link,
+                        UseShellExecute = false
+                    }
+                };
+            }
+            else
+            {
+                launchAttempts = new List<ProcessStartInfo>
+                {
+                    new ProcessStartInfo
+                    {
+                        FileName = link,
+                        UseShellExecute = true,   // let Windows shell pick the handler (default browser)
+                        Verb = "open"
+                    }
+                };
+            }
 
             bool success = false;
             int attempts = 0;
@@ -582,18 +616,20 @@ namespace Ijewel3D
                 }
                 catch (Exception ex)
                 {
-                    RhinoApp.WriteLine("Open brwoser Attmpt " + attempts + "failed " + ex.Message + "\n");
-
+                    RhinoApp.WriteLine("Open browser Attempt " + attempts + " failed " + ex.Message + "\n");
                 }
                 attempts++;
             }
 
             if (!success)
             {
+                string browserList = Rhino.Runtime.HostUtils.RunningOnOSX
+                    ? "Google Chrome, Firefox, or Opera"
+                    : "Google Chrome, Firefox, Opera, or Microsoft Edge";
 
                 Dialogs.ShowMessage(
                     "None of the supported browsers appear to be installed or accessible.\n\n" +
-                    "Please install Google Chrome, Firefox, or Opera to use the plugin",
+                    $"Please install {browserList} to use the plugin",
                     "Error Launching Browser",
                     ShowMessageButton.OK,
                     ShowMessageIcon.Error
