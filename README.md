@@ -4,6 +4,9 @@
 iJewelViewer is a crossplatform C# plugin for Rhino, designed to simplify the designer role by enabling users to export models from Rhino and view them in iJewelViewer. This plugin integrates a HTTP server and a web view within Rhino, facilitating the display and interaction with iJewel Viewer.
 The models can be rendered to images, videos or shared online.
 
+For detailed setup, usage, and sharing workflows, see our docs:  
+[Rhino Plugin Integration](https://docs.ijewel3d.com/integrations/rhino-plugin-integration.html)
+
 ## Features
 - **Model Exporting:** Allows exporting Rhino models to a specified directory.
 - **HTTP Server Integration:** Hosts a local HTTP server to serve exported models and other resources.
