@@ -23,6 +23,7 @@ namespace Ijewel3D
         public static string BaseDirectory;
 
         protected ServerUtility serverUtility;
+        protected string baseUrl = "https://ijewel.design/rhinoceros";
 
 
 
@@ -77,7 +78,7 @@ namespace Ijewel3D
                 RhinoApp.WriteLine("Exporting model...");
                 ExportModel(doc, (int)serverUtility.chosenPort);
 
-                string uri = "https://ijewel.design/rhinoceros";
+                string uri = baseUrl;
 
                 if (Rhino.Runtime.HostUtils.RunningOnOSX)
                 {
@@ -486,51 +487,38 @@ namespace Ijewel3D
 
         protected override Result RunCommand(RhinoDoc doc, RunMode mode)
         {
-            try
+            this.baseUrl = "https://ijewel3d.com/drive/playground?rhino";
+            return base.RunCommand(doc, mode);
+        }
+    }
+
+    public class IJewelEnterprise : IJewelViewer
+    {
+        public override string EnglishName => "iJewelEnterprise";
+        
+        protected override Result RunCommand(RhinoDoc doc, RunMode mode)
+        {
+            var gs = new Rhino.Input.Custom.GetString();
+            gs.SetCommandPrompt("Enter your drive name");
+            gs.AcceptNothing(true);
+            gs.Get();
+
+            string drive = null;
+            if (gs.CommandResult() == Result.Success)
             {
-                RhinoApp.WriteLine("Checking internet connectivity...");
-
-                if (!serverUtility.CheckInternetConnectivity())
-                {
-                    RhinoApp.WriteLine("Error: No internet connection detected.");
-                    ShowNoInternetDialog();
-                    return Result.Failure;
-                }
-
-                RhinoApp.WriteLine("Internet connection verified.");
-                RhinoApp.WriteLine("Starting iJewel client...");
-
-
-
-                RhinoModelObserver obs = RhinoModelObserver.Instance;
-                obs.ModelHasChanged = true;
-
-                // Only start server if one isn't already running
-                serverUtility.StartFileServer();
-
-                if (serverUtility.chosenPort == null)
-                {
-                    RhinoApp.WriteLine("Error: No free port found.");
-                    return Result.Failure;
-                }
-
-                ExportModel(doc, (int)serverUtility.chosenPort);
-
-                string uri = "https://playground.ijewel3d.com/v2/?rhino";
-                if (!BrowserLauncher.LaunchBrowser(uri , (int)serverUtility.chosenPort))
-                {
-                    var webViewForm = new WebViewForm(uri, serverUtility);
-                    webViewForm.Show();
-                }
-
-                return Result.Success;
+                drive = gs.StringResult();
             }
-            catch (Exception ex)
+
+            if (!string.IsNullOrWhiteSpace(drive))
             {
-                RhinoApp.WriteLine($"Error in RunCommand: {ex.Message}");
-                RhinoApp.WriteLine($"Stack Trace: {ex.StackTrace}");
-                return Result.Failure;
+                this.baseUrl = $"https://ijewel3d.com/{drive}/playground?rhino";
             }
+            else
+            {
+                this.baseUrl = "https://ijewel3d.com/drive/playground?rhino";
+            }
+
+            return base.RunCommand(doc, mode);
         }
     }
 
