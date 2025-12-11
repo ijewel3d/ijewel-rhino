@@ -487,6 +487,17 @@ namespace Ijewel3D
 
         protected override Result RunCommand(RhinoDoc doc, RunMode mode)
         {
+            this.baseUrl = "https://playground.ijewel3d.com/v2/?rhino";
+            return base.RunCommand(doc, mode);
+        }
+    }
+
+    public class IJewelPlatform : IJewelViewer
+    {
+        public override string EnglishName => "IJewelPlatform";
+
+        protected override Result RunCommand(RhinoDoc doc, RunMode mode)
+        {
             this.baseUrl = "https://ijewel3d.com/drive/playground?rhino";
             return base.RunCommand(doc, mode);
         }
