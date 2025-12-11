@@ -1,5 +1,5 @@
 name: iJewelViewer
-version: 0.1.18
+version: 0.2.5
 authors:
   - iJewel3D
 description: |
@@ -27,3 +27,4 @@ keywords:
   - ijewel3d
   - ijewel
   - ijewelviewer
+  - ijewelplayground

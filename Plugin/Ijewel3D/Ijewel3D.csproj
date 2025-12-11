@@ -27,6 +27,12 @@
   <ItemGroup>
     <EmbeddedResource Include="EmbeddedResources\**\*" />
   </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="resources\**" />
+    <EmbeddedResource Remove="resources\**" />
+    <None Remove="resources\**" />
+  </ItemGroup>
   
   <ItemGroup>
     <PackageReference Include="RhinoCommon" Version="8.11.24254.15001" IncludeAssets="compile;build" />
