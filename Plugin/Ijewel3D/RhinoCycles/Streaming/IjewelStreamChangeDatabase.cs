@@ -18,6 +18,7 @@ namespace Ijewel3D
     internal sealed class IjewelStreamChangeDatabase : ChangeDatabase
     {
         private const int StreamDebounceMilliseconds = 500;
+        private const int TransformStreamIntervalMilliseconds = 33;
         private const int StreamSendTimeoutMilliseconds = 10000;
         private const int StreamCloseTimeoutMilliseconds = 2000;
 
@@ -25,12 +26,15 @@ namespace Ijewel3D
         private readonly List<WebSocket> _sockets = new List<WebSocket>();
         private readonly Dictionary<WebSocket, SemaphoreSlim> _socketSendLocks = new Dictionary<WebSocket, SemaphoreSlim>();
         private readonly object _drainLock = new object();
+        private readonly SemaphoreSlim _streamLock = new SemaphoreSlim(1, 1);
         private readonly CancellationTokenSource _disposeTokenSource = new CancellationTokenSource();
 
         private Timer _debounceTimer;
+        private Timer _transformTimer;
         private bool _dirty;
         private bool _fullRequested;
         private bool _draining;
+        private bool _transformDraining;
         private bool _worldCreated;
         private bool _disposedStreaming;
         private long _sequence;
@@ -98,6 +102,15 @@ namespace Ijewel3D
             }
         }
 
+        public void QueueTransformStream()
+        {
+            lock (_socketLock)
+            {
+                if (_sockets.Count == 0) return;
+                EnsureTransformTimer();
+            }
+        }
+
         public async Task HandleModelWebSocket(HttpListenerContext context, CancellationToken cancellationToken)
         {
             WebSocket socket = null;
@@ -112,6 +125,7 @@ namespace Ijewel3D
                     {
                         _sockets.Add(socket);
                         _socketSendLocks[socket] = new SemaphoreSlim(1, 1);
+                        EnsureTransformTimer();
                     }
 
                     QueueStream(true, true);
@@ -157,6 +171,8 @@ namespace Ijewel3D
                 _disposeTokenSource.Cancel();
                 _debounceTimer?.Dispose();
                 _debounceTimer = null;
+                _transformTimer?.Dispose();
+                _transformTimer = null;
 
                 lock (_socketLock)
                 {
@@ -171,6 +187,7 @@ namespace Ijewel3D
                 }
 
                 _disposeTokenSource.Dispose();
+                _streamLock.Dispose();
             }
 
             base.Dispose(isDisposing);
@@ -311,10 +328,18 @@ namespace Ijewel3D
                         _fullRequested = false;
                     }
 
-                    var payload = BuildFrameOnMainThread(full);
-                    if (payload != null && payload.Length > 0)
+                    await _streamLock.WaitAsync(_disposeTokenSource.Token);
+                    try
                     {
-                        await Broadcast(payload);
+                        var payload = BuildFrameOnMainThread(full);
+                        if (payload != null && payload.Length > 0)
+                        {
+                            await Broadcast(payload);
+                        }
+                    }
+                    finally
+                    {
+                        _streamLock.Release();
                     }
                 }
             }
@@ -338,6 +363,52 @@ namespace Ijewel3D
             }
         }
 
+        private async Task FlushTransformStreamAsync()
+        {
+            lock (_drainLock)
+            {
+                if (_transformDraining || _draining || _dirty || !_worldCreated) return;
+                _transformDraining = true;
+            }
+
+            try
+            {
+                await _streamLock.WaitAsync(_disposeTokenSource.Token);
+                try
+                {
+                    byte[] payload;
+                    lock (_drainLock)
+                    {
+                        if (_dirty || !_worldCreated) return;
+                    }
+
+                    payload = BuildTransformFrameOnMainThread();
+                    if (payload != null && payload.Length > 0)
+                    {
+                        await Broadcast(payload);
+                    }
+                }
+                finally
+                {
+                    _streamLock.Release();
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                RhinoApp.WriteLine($"Model WebSocket transform stream error: {ex.Message}");
+            }
+            finally
+            {
+                lock (_drainLock)
+                {
+                    _transformDraining = false;
+                }
+            }
+        }
+
         private byte[] BuildFrameOnMainThread(bool full)
         {
             byte[] payload = null;
@@ -350,6 +421,36 @@ namespace Ijewel3D
                     try
                     {
                         payload = BuildFrame(full);
+                    }
+                    catch (Exception ex)
+                    {
+                        error = ex;
+                    }
+                    finally
+                    {
+                        wait.Set();
+                    }
+                }));
+
+                wait.Wait(_disposeTokenSource.Token);
+            }
+
+            if (error != null) throw error;
+            return payload;
+        }
+
+        private byte[] BuildTransformFrameOnMainThread()
+        {
+            byte[] payload = null;
+            Exception error = null;
+
+            using (var wait = new ManualResetEventSlim(false))
+            {
+                RhinoApp.InvokeOnUiThread((Action)(() =>
+                {
+                    try
+                    {
+                        payload = BuildTransformFrame();
                     }
                     catch (Exception ex)
                     {
@@ -400,6 +501,37 @@ namespace Ijewel3D
                 ResetChangeQueue();
             return Encoding.UTF8.GetBytes(json);
         }
+            finally
+            {
+                _frame = null;
+            }
+        }
+
+        private byte[] BuildTransformFrame()
+        {
+            if (!_worldCreated) return null;
+
+            Flush();
+
+            if (StreamObjectDatabase.ObjectTransforms.Count == 0) return null;
+
+            var latestTransforms = new Dictionary<uint, CyclesObjectTransform>();
+            foreach (var transform in StreamObjectDatabase.ObjectTransforms)
+            {
+                if (transform == null) continue;
+                latestTransforms[transform.Id] = transform;
+            }
+
+            if (latestTransforms.Count == 0) return null;
+
+            _frame = new StreamFrame(++_sequence, false);
+            try
+            {
+                _frame.Transforms.AddRange(latestTransforms.Values);
+                var json = _frame.ToJson();
+                StreamObjectDatabase.ResetDynamicObjectTransformChangeQueue();
+                return Encoding.UTF8.GetBytes(json);
+            }
             finally
             {
                 _frame = null;
@@ -533,6 +665,16 @@ namespace Ijewel3D
             }
         }
 
+        private void EnsureTransformTimer()
+        {
+            if (_transformTimer == null)
+            {
+                _transformTimer = new Timer(_ => Task.Run(FlushTransformStreamAsync), null, Timeout.Infinite, Timeout.Infinite);
+            }
+
+            _transformTimer.Change(TransformStreamIntervalMilliseconds, TransformStreamIntervalMilliseconds);
+        }
+
         private async Task CloseSocketAsync(WebSocket socket, CancellationToken cancellationToken)
         {
             SemaphoreSlim sendLock = null;
@@ -595,6 +737,10 @@ namespace Ijewel3D
             {
                 _sockets.Remove(socket);
                 _socketSendLocks.Remove(socket);
+                if (_sockets.Count == 0)
+                {
+                    _transformTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+                }
             }
 
             try { socket.Abort(); }

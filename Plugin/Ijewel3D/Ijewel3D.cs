@@ -385,6 +385,11 @@ namespace Ijewel3D
             _streamDatabase?.QueueStream(immediate);
         }
 
+        public void QueueTransformSnapshot()
+        {
+            _streamDatabase?.QueueTransformStream();
+        }
+
         private void ServeFile(HttpListenerContext context, string path)
         {
             try
@@ -652,7 +657,7 @@ namespace Ijewel3D
             RhinoDoc.UndeleteRhinoObject += (s, e) => MarkChanged();
             RhinoDoc.ReplaceRhinoObject += (s, e) => MarkChanged();
             RhinoDoc.ModifyObjectAttributes += (s, e) => MarkChanged();
-            RhinoDoc.BeforeTransformObjects += (s, e) => MarkChanged();
+            RhinoDoc.BeforeTransformObjects += (s, e) => MarkTransformChanged();
             RhinoDoc.MaterialTableEvent += (s, e) => MarkChanged();
             RhinoDoc.LayerTableEvent += (s, e) => MarkChanged();
 
@@ -661,6 +666,11 @@ namespace Ijewel3D
         private void MarkChanged()
         {
             ServerUtility.Active?.QueueModelSnapshot();
+        }
+
+        private void MarkTransformChanged()
+        {
+            ServerUtility.Active?.QueueTransformSnapshot();
         }
     }
 
