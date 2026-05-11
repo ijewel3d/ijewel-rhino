@@ -5,6 +5,7 @@ using RhinoCyclesCore;
 using RhinoCyclesCore.Converters;
 using RhinoCyclesCore.Database;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Net;
@@ -39,6 +40,7 @@ namespace Ijewel3D
         private bool _disposedStreaming;
         private long _sequence;
         private StreamFrame _frame;
+        private readonly ConcurrentQueue<ObjectAttributeChange> _objectAttributeChanges = new ConcurrentQueue<ObjectAttributeChange>();
 
         private IjewelStreamChangeDatabase(
             Guid pluginId,
@@ -100,6 +102,26 @@ namespace Ijewel3D
 
                 _debounceTimer.Change(immediate ? 0 : StreamDebounceMilliseconds, Timeout.Infinite);
             }
+        }
+
+        public void QueueObjectAttributesChange(Guid objectId, ObjectAttributes attributes, bool immediate = false)
+        {
+            if (objectId == Guid.Empty || attributes == null) return;
+
+            var doc = RhinoDoc.FromRuntimeSerialNumber(StreamDocumentSerialNumber);
+            var layer = doc != null && attributes.LayerIndex >= 0 && attributes.LayerIndex < doc.Layers.Count
+                ? doc.Layers[attributes.LayerIndex]
+                : null;
+
+            _objectAttributeChanges.Enqueue(new ObjectAttributeChange
+            {
+                ObjectId = objectId,
+                LayerName = layer?.Name,
+                LayerFullPath = layer?.FullPath,
+                MaterialSource = attributes.MaterialSource.ToString().ToLowerInvariant()
+            });
+
+            QueueStream(immediate);
         }
 
         public void QueueTransformStream()
@@ -495,6 +517,7 @@ namespace Ijewel3D
                 UploadMeshChanges();
                 UploadLightChanges();
                 UploadObjectChanges();
+                UploadObjectAttributeChanges();
                 UploadObjectShaderChanges();
 
                 var json = _frame.ToJson();
@@ -504,6 +527,33 @@ namespace Ijewel3D
             finally
             {
                 _frame = null;
+            }
+        }
+
+        private void UploadObjectAttributeChanges()
+        {
+            if (_frame == null) return;
+
+            while (_objectAttributeChanges.TryDequeue(out var change))
+            {
+                var objectIds = StreamObjectDatabase.FindObjectIdsForSourceId(change.ObjectId);
+                foreach (var obid in objectIds)
+                {
+                    var currentHash = StreamObjectShaderDatabase.FindRenderHashForObjectId(obid);
+                    var material = currentHash != uint.MaxValue ? MaterialFromId(currentHash) : null;
+                    var assignment = new CyclesObjectShader(obid)
+                    {
+                        OldShaderHash = currentHash,
+                        NewShaderHash = currentHash,
+                        MaterialName = material?.Name,
+                        LayerName = change.LayerName,
+                        LayerFullPath = change.LayerFullPath,
+                        MaterialSource = change.MaterialSource
+                    };
+
+                    StreamObjectShaderDatabase.ApplyStoredMaterialMetadata(assignment);
+                    StreamObjectShaderDatabase.AddObjectShaderChange(assignment);
+                }
             }
         }
 
@@ -536,6 +586,14 @@ namespace Ijewel3D
             {
                 _frame = null;
             }
+        }
+
+        private sealed class ObjectAttributeChange
+        {
+            public Guid ObjectId { get; set; }
+            public string LayerName { get; set; }
+            public string LayerFullPath { get; set; }
+            public string MaterialSource { get; set; }
         }
 
         private void AddMeshToFrame(CyclesMesh mesh)

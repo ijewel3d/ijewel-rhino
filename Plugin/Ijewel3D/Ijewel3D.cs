@@ -385,6 +385,11 @@ namespace Ijewel3D
             _streamDatabase?.QueueStream(immediate);
         }
 
+        public void QueueObjectAttributesSnapshot(Guid objectId, ObjectAttributes attributes, bool immediate = false)
+        {
+            _streamDatabase?.QueueObjectAttributesChange(objectId, attributes, immediate);
+        }
+
         public void QueueTransformSnapshot()
         {
             _streamDatabase?.QueueTransformStream();
@@ -656,7 +661,7 @@ namespace Ijewel3D
             RhinoDoc.DeleteRhinoObject += (s, e) => MarkChanged();
             RhinoDoc.UndeleteRhinoObject += (s, e) => MarkChanged();
             RhinoDoc.ReplaceRhinoObject += (s, e) => MarkChanged();
-            RhinoDoc.ModifyObjectAttributes += (s, e) => MarkChanged();
+            RhinoDoc.ModifyObjectAttributes += (s, e) => MarkObjectAttributesChanged(e);
             RhinoDoc.BeforeTransformObjects += (s, e) => MarkTransformChanged();
             RhinoDoc.MaterialTableEvent += (s, e) => MarkChanged();
             RhinoDoc.LayerTableEvent += (s, e) => MarkChanged();
@@ -666,6 +671,25 @@ namespace Ijewel3D
         private void MarkChanged()
         {
             ServerUtility.Active?.QueueModelSnapshot();
+        }
+
+        private void MarkObjectAttributesChanged(RhinoModifyObjectAttributesEventArgs e)
+        {
+            if (e == null)
+            {
+                MarkChanged();
+                return;
+            }
+
+            if (e.OldAttributes.LayerIndex != e.NewAttributes.LayerIndex ||
+                e.OldAttributes.MaterialSource != e.NewAttributes.MaterialSource ||
+                e.OldAttributes.MaterialIndex != e.NewAttributes.MaterialIndex)
+            {
+                ServerUtility.Active?.QueueObjectAttributesSnapshot(e.RhinoObject.Id, e.NewAttributes);
+                return;
+            }
+
+            MarkChanged();
         }
 
         private void MarkTransformChanged()

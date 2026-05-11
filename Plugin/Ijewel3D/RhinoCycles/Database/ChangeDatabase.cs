@@ -1305,6 +1305,7 @@ namespace RhinoCyclesCore.Database
 				var matid = a.MaterialId;
 				var mat = a.RenderMaterial;
 				var metadata = GetMaterialMetadata(a.ObjectAttributes, mat);
+				_objectDatabase.RecordObjectSourceIdRelations(a.InstanceId, SourceIdsForMeshInstance(a));
 
 				var stat = $"\tHandling mesh instance ({a.InstanceId}). material {mat?.Name ?? string.Empty}. Mesh id {meshid}.";
 				RcCore.It.AddLogStringIfVerbose(stat);
@@ -1349,6 +1350,18 @@ namespace RhinoCyclesCore.Database
 
 				_objectDatabase.AddOrUpdateObject(ob);
 			});
+		}
+
+		private static IEnumerable<Guid> SourceIdsForMeshInstance(MeshInstance meshInstance)
+		{
+			if (meshInstance == null) yield break;
+
+			if (meshInstance.MeshId != Guid.Empty) yield return meshInstance.MeshId;
+			if (meshInstance.RootId != Guid.Empty) yield return meshInstance.RootId;
+			if (meshInstance.ParentId != Guid.Empty) yield return meshInstance.ParentId;
+
+			var attributeObjectId = meshInstance.ObjectAttributes?.ObjectId ?? Guid.Empty;
+			if (attributeObjectId != Guid.Empty) yield return attributeObjectId;
 		}
 
 		private MaterialMetadata GetMaterialMetadata(ObjectAttributes attributes, RenderMaterial material)

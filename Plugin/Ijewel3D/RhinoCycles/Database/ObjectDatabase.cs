@@ -52,6 +52,7 @@ namespace RhinoCyclesCore.Database
 		/// Record what meshinstanceid (objectid) points to what meshid
 		/// </summary>
 		private readonly ConcurrentDictionary<uint, Tuple<Guid, int>> _rhObjectidMeshid = new ConcurrentDictionary<uint, Tuple<Guid, int>>();
+		private readonly ConcurrentDictionary<Guid, ConcurrentDictionary<uint, bool>> _rhSourceObjectIds = new ConcurrentDictionary<Guid, ConcurrentDictionary<uint, bool>>();
 		#endregion
 		#region lists for objects (rhino <-> cycles)
 		/// <summary>
@@ -80,6 +81,7 @@ namespace RhinoCyclesCore.Database
 			ResetDynamicObjectTransformChangeQueue();
 			_rhCclMeshes.Clear();
 			_rhObjectidMeshid.Clear();
+			_rhSourceObjectIds.Clear();
 			_rhCclObjects.Clear();
 		}
 
@@ -264,6 +266,37 @@ namespace RhinoCyclesCore.Database
 		public void RecordObjectIdMeshIdRelation(uint obid, Tuple<Guid, int> meshid)
 		{
 			_rhObjectidMeshid[obid] = meshid;
+		}
+
+		public void RecordObjectSourceIdRelations(uint obid, IEnumerable<Guid> sourceIds)
+		{
+			if (sourceIds == null) return;
+
+			foreach (var sourceId in sourceIds)
+			{
+				if (sourceId == Guid.Empty) continue;
+
+				var objectIds = _rhSourceObjectIds.GetOrAdd(sourceId, _ => new ConcurrentDictionary<uint, bool>());
+				objectIds[obid] = true;
+			}
+		}
+
+		public List<uint> FindObjectIdsForSourceId(Guid sourceId)
+		{
+			var obids = new List<uint>();
+			if (sourceId == Guid.Empty) return obids;
+
+			if (_rhSourceObjectIds.TryGetValue(sourceId, out var mappedObjectIds))
+			{
+				obids.AddRange(mappedObjectIds.Keys);
+			}
+
+			foreach (var relation in _rhObjectidMeshid.Where(x => x.Value.Item1.Equals(sourceId) && !obids.Contains(x.Key)))
+			{
+				obids.Add(relation.Key);
+			}
+
+			return obids;
 		}
 
 		/// <summary>
