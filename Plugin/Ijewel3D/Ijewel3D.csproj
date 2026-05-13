@@ -6,6 +6,7 @@
     <Title>Ijewel3D</Title>
     <Description>Description of Ijewel3D</Description>
     <TargetExt>.rhp</TargetExt>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(TargetFramework)|$(Platform)'=='Debug|net7.0|AnyCPU'">
@@ -35,6 +36,7 @@
   </ItemGroup>
   
   <ItemGroup>
+    <PackageReference Include="Fleck" Version="1.2.0" />
     <PackageReference Include="RhinoCommon" Version="8.11.24254.15001" IncludeAssets="compile;build" />
     <PackageReference Include="System.Net.Http" Version="4.3.4" />
   </ItemGroup>

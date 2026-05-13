@@ -8,8 +8,6 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
-using System.Net;
-using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -21,11 +19,10 @@ namespace Ijewel3D
         private const int StreamDebounceMilliseconds = 500;
         private const int TransformStreamIntervalMilliseconds = 33;
         private const int StreamSendTimeoutMilliseconds = 10000;
-        private const int StreamCloseTimeoutMilliseconds = 2000;
 
         private readonly object _socketLock = new object();
-        private readonly List<WebSocket> _sockets = new List<WebSocket>();
-        private readonly Dictionary<WebSocket, SemaphoreSlim> _socketSendLocks = new Dictionary<WebSocket, SemaphoreSlim>();
+        private readonly List<IjewelStreamClient> _clients = new List<IjewelStreamClient>();
+        private readonly Dictionary<IjewelStreamClient, SemaphoreSlim> _clientSendLocks = new Dictionary<IjewelStreamClient, SemaphoreSlim>();
         private readonly object _drainLock = new object();
         private readonly SemaphoreSlim _streamLock = new SemaphoreSlim(1, 1);
         private readonly CancellationTokenSource _disposeTokenSource = new CancellationTokenSource();
@@ -92,7 +89,7 @@ namespace Ijewel3D
 
                 lock (_socketLock)
                 {
-                    if (_sockets.Count == 0) return;
+                    if (_clients.Count == 0) return;
                 }
 
                 if (_debounceTimer == null)
@@ -124,60 +121,69 @@ namespace Ijewel3D
             QueueStream(immediate);
         }
 
+        public void QueueObjectAttributesChange(RhinoModifyObjectAttributesEventArgs e, bool immediate = false)
+        {
+            if (e?.OldAttributes == null || e.NewAttributes == null || e.RhinoObject == null)
+            {
+                QueueStream(immediate);
+                return;
+            }
+
+            if (e.OldAttributes.LayerIndex != e.NewAttributes.LayerIndex ||
+                e.OldAttributes.MaterialSource != e.NewAttributes.MaterialSource ||
+                e.OldAttributes.MaterialIndex != e.NewAttributes.MaterialIndex)
+            {
+                QueueObjectAttributesChange(e.RhinoObject.Id, e.NewAttributes, immediate);
+                return;
+            }
+
+            QueueStream(immediate);
+        }
+
         public void QueueTransformStream()
         {
             lock (_socketLock)
             {
-                if (_sockets.Count == 0) return;
+                if (_clients.Count == 0) return;
                 EnsureTransformTimer();
             }
         }
 
-        public async Task HandleModelWebSocket(HttpListenerContext context, CancellationToken cancellationToken)
+        public void AddClient(IjewelStreamClient client)
         {
-            WebSocket socket = null;
-            using (var linkedTokenSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _disposeTokenSource.Token))
+            if (client == null) throw new ArgumentNullException(nameof(client));
+
+            lock (_socketLock)
             {
-                try
-                {
-                    var wsContext = await context.AcceptWebSocketAsync(null);
-                    socket = wsContext.WebSocket;
+                if (_clientSendLocks.ContainsKey(client)) return;
+                _clients.Add(client);
+                _clientSendLocks[client] = new SemaphoreSlim(1, 1);
+                EnsureTransformTimer();
+            }
 
-                    lock (_socketLock)
-                    {
-                        _sockets.Add(socket);
-                        _socketSendLocks[socket] = new SemaphoreSlim(1, 1);
-                        EnsureTransformTimer();
-                    }
+            QueueStream(true, true);
+        }
 
-                    QueueStream(true, true);
+        public void RemoveClient(IjewelStreamClient client)
+        {
+            if (client == null) return;
 
-                    var buffer = new byte[1];
-                    while (socket.State == WebSocketState.Open && !linkedTokenSource.IsCancellationRequested)
-                    {
-                        var result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), linkedTokenSource.Token);
-                        if (result.MessageType == WebSocketMessageType.Close)
-                        {
-                            await CloseSocketAsync(socket, linkedTokenSource.Token);
-                            break;
-                        }
-                    }
-                }
-                catch (OperationCanceledException)
+            SemaphoreSlim sendLock = null;
+            lock (_socketLock)
+            {
+                _clients.Remove(client);
+                if (_clientSendLocks.TryGetValue(client, out sendLock))
                 {
+                    _clientSendLocks.Remove(client);
                 }
-                catch (Exception ex)
+
+                if (_clients.Count == 0)
                 {
-                    RhinoApp.WriteLine($"Model WebSocket error: {ex.Message}");
-                }
-                finally
-                {
-                    if (socket != null)
-                    {
-                        RemoveSocket(socket);
-                    }
+                    _transformTimer?.Change(Timeout.Infinite, Timeout.Infinite);
                 }
             }
+
+            sendLock?.Dispose();
         }
 
         protected override void Dispose(bool isDisposing)
@@ -198,14 +204,18 @@ namespace Ijewel3D
 
                 lock (_socketLock)
                 {
-                    foreach (var socket in _sockets.ToArray())
+                    foreach (var client in _clients.ToArray())
                     {
-                        try { socket.Abort(); socket.Dispose(); }
+                        try { client.Close(); }
                         catch { }
                     }
 
-                    _sockets.Clear();
-                    _socketSendLocks.Clear();
+                    _clients.Clear();
+                    foreach (var sendLock in _clientSendLocks.Values)
+                    {
+                        sendLock.Dispose();
+                    }
+                    _clientSendLocks.Clear();
                 }
 
                 _disposeTokenSource.Dispose();
@@ -651,20 +661,20 @@ namespace Ijewel3D
 
         private async Task Broadcast(byte[] payload)
         {
-            KeyValuePair<WebSocket, SemaphoreSlim>[] sockets;
+            KeyValuePair<IjewelStreamClient, SemaphoreSlim>[] clients;
             lock (_socketLock)
             {
-                sockets = new List<KeyValuePair<WebSocket, SemaphoreSlim>>(_socketSendLocks).ToArray();
+                clients = new List<KeyValuePair<IjewelStreamClient, SemaphoreSlim>>(_clientSendLocks).ToArray();
             }
 
-            foreach (var item in sockets)
+            foreach (var item in clients)
             {
-                var socket = item.Key;
+                var client = item.Key;
                 var sendLock = item.Value;
 
-                if (socket.State != WebSocketState.Open)
+                if (!client.IsOpen)
                 {
-                    RemoveSocket(socket);
+                    RemoveClient(client);
                     continue;
                 }
 
@@ -682,20 +692,16 @@ namespace Ijewel3D
                         {
                             lock (_socketLock)
                             {
-                                if (!_socketSendLocks.ContainsKey(socket)) continue;
+                                if (!_clientSendLocks.ContainsKey(client)) continue;
                             }
 
-                            if (socket.State != WebSocketState.Open)
+                            if (!client.IsOpen)
                             {
-                                RemoveSocket(socket);
+                                RemoveClient(client);
                                 continue;
                             }
 
-                            await socket.SendAsync(
-                                new ArraySegment<byte>(payload),
-                                WebSocketMessageType.Binary,
-                                true,
-                                sendTimeout.Token);
+                            await client.SendAsync(payload, sendTimeout.Token);
                         }
                         finally
                         {
@@ -713,12 +719,12 @@ namespace Ijewel3D
                         RhinoApp.WriteLine("Model WebSocket send timed out. Removing stale client.");
                     }
 
-                    RemoveSocket(socket);
+                    RemoveClient(client);
                 }
                 catch (Exception ex)
                 {
                     RhinoApp.WriteLine($"Model WebSocket send failed: {ex.Message}");
-                    RemoveSocket(socket);
+                    RemoveClient(client);
                 }
             }
         }
@@ -731,81 +737,6 @@ namespace Ijewel3D
             }
 
             _transformTimer.Change(TransformStreamIntervalMilliseconds, TransformStreamIntervalMilliseconds);
-        }
-
-        private async Task CloseSocketAsync(WebSocket socket, CancellationToken cancellationToken)
-        {
-            SemaphoreSlim sendLock = null;
-            lock (_socketLock)
-            {
-                _socketSendLocks.TryGetValue(socket, out sendLock);
-            }
-
-            if (sendLock == null)
-            {
-                RemoveSocket(socket);
-                return;
-            }
-
-            using (var closeTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _disposeTokenSource.Token))
-            {
-                closeTimeout.CancelAfter(StreamCloseTimeoutMilliseconds);
-
-                var lockTaken = false;
-                try
-                {
-                    await sendLock.WaitAsync(closeTimeout.Token);
-                    lockTaken = true;
-
-                    try
-                    {
-                        if (socket.State == WebSocketState.Open || socket.State == WebSocketState.CloseReceived)
-                        {
-                            await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, string.Empty, closeTimeout.Token);
-                        }
-                    }
-                    finally
-                    {
-                        if (lockTaken)
-                        {
-                            sendLock.Release();
-                        }
-                    }
-                }
-                catch (OperationCanceledException)
-                {
-                    if (!_disposeTokenSource.IsCancellationRequested)
-                    {
-                        RhinoApp.WriteLine("Model WebSocket close timed out. Removing stale client.");
-                    }
-
-                    RemoveSocket(socket);
-                }
-                catch (Exception ex)
-                {
-                    RhinoApp.WriteLine($"Model WebSocket close failed: {ex.Message}");
-                    RemoveSocket(socket);
-                }
-            }
-        }
-
-        private void RemoveSocket(WebSocket socket)
-        {
-            lock (_socketLock)
-            {
-                _sockets.Remove(socket);
-                _socketSendLocks.Remove(socket);
-                if (_sockets.Count == 0)
-                {
-                    _transformTimer?.Change(Timeout.Infinite, Timeout.Infinite);
-                }
-            }
-
-            try { socket.Abort(); }
-            catch { }
-
-            try { socket.Dispose(); }
-            catch { }
         }
 
         private sealed class StreamFrame

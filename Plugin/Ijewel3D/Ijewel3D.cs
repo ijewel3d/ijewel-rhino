@@ -2,20 +2,16 @@
 using Rhino;
 using Rhino.Commands;
 using Rhino.DocObjects;
-using Rhino.FileIO;
-using Rhino.Geometry;
 using Rhino.UI;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
-using System.Net.WebSockets;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Threading;
-using System.Threading.Tasks;
 using System.Net.Http;
 
 
@@ -78,8 +74,6 @@ namespace Ijewel3D
                     RhinoApp.WriteLine("Error: No free port found.");
                     return Result.Failure;
                 }
-
-                serverUtility.InitializeModelStream(doc);
 
                 RhinoApp.WriteLine("Exporting model...");
                 ExportModel(doc, (int)serverUtility.chosenPort);
@@ -149,7 +143,6 @@ namespace Ijewel3D
                 RhinoApp.WriteLine($"Export error: {ex.Message}");
             }
         }
-
     }
 
     class WebViewForm : Form
@@ -205,20 +198,12 @@ namespace Ijewel3D
     public class ServerUtility
     {
         private static readonly HttpClient _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-        public static ServerUtility Active { get; private set; }
 
         public int? chosenPort = null;
         private HttpListener _listener;
         private CancellationTokenSource _cancellationTokenSource;
         private Thread _serverThread;
         public int DEFAULT_FALLBACK_PORT = 8469;
-        private IjewelStreamChangeDatabase _streamDatabase;
-
-        public void InitializeModelStream(RhinoDoc doc)
-        {
-            _streamDatabase?.Dispose();
-            _streamDatabase = IjewelStreamChangeDatabase.Create(doc);
-        }
 
         public int? FindFreePort()
         {
@@ -264,9 +249,8 @@ namespace Ijewel3D
             }
 
             _listener = new HttpListener();
-            _listener.Prefixes.Add($"http://+:{chosenPort}/");
+            _listener.Prefixes.Add($"http://localhost:{chosenPort}/");
             _listener.Start();
-            Active = this;
 
             _cancellationTokenSource = new CancellationTokenSource();
             _serverThread = new Thread(() => ServerThreadStart(_listener, _cancellationTokenSource.Token));
@@ -289,14 +273,33 @@ namespace Ijewel3D
                 _cancellationTokenSource.Dispose();
                 _cancellationTokenSource = null;
             }
+        }
 
-            _streamDatabase?.Dispose();
-            _streamDatabase = null;
 
-            if (ReferenceEquals(Active, this))
+        private Dictionary<string, string> ParseQueryString(string query)
+        {
+            var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            if (string.IsNullOrEmpty(query))
+                return result;
+
+            // Remove leading '?'
+            if (query.StartsWith("?"))
+                query = query.Substring(1);
+
+            // Split key/value pairs by '&'
+            var pairs = query.Split(new[] { '&' }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (var pair in pairs)
             {
-                Active = null;
+                // Each pair might look like "force" or "force=true"
+                var parts = pair.Split(new[] { '=' }, 2);
+                string key = Uri.UnescapeDataString(parts[0]);
+                string value = parts.Length > 1 ? Uri.UnescapeDataString(parts[1]) : "";
+
+                result[key] = value;
             }
+
+            return result;
         }
 
         public void ServerThreadStart(HttpListener listener, CancellationToken cancellationToken)
@@ -334,28 +337,9 @@ namespace Ijewel3D
                 return;
             }
 
-            if (context.Request.Url.AbsolutePath.Equals("/ws/model", StringComparison.OrdinalIgnoreCase))
+            if (context.Request.Url.AbsolutePath.Equals("/api/has-changed", StringComparison.OrdinalIgnoreCase))
             {
-                if (context.Request.IsWebSocketRequest)
-                {
-                    var streamDatabase = _streamDatabase;
-                    if (streamDatabase == null)
-                    {
-                        context.Response.StatusCode = (int)HttpStatusCode.ServiceUnavailable;
-                        context.Response.Close();
-                    }
-                    else
-                    {
-                        Task.Run(() => streamDatabase.HandleModelWebSocket(
-                            context,
-                            _cancellationTokenSource?.Token ?? CancellationToken.None));
-                    }
-                }
-                else
-                {
-                    context.Response.StatusCode = (int)HttpStatusCode.BadRequest;
-                    context.Response.Close();
-                }
+                HandleHasChangedEndpoint(context);
                 return;
             }
 
@@ -380,35 +364,13 @@ namespace Ijewel3D
             }
         }
 
-        public void QueueModelSnapshot(bool immediate = false)
-        {
-            _streamDatabase?.QueueStream(immediate);
-        }
-
-        public void QueueObjectAttributesSnapshot(Guid objectId, ObjectAttributes attributes, bool immediate = false)
-        {
-            _streamDatabase?.QueueObjectAttributesChange(objectId, attributes, immediate);
-        }
-
-        public void QueueTransformSnapshot()
-        {
-            _streamDatabase?.QueueTransformStream();
-        }
-
         private void ServeFile(HttpListenerContext context, string path)
         {
             try
             {
+                byte[] content = File.ReadAllBytes(path);
                 AddCorsHeaders(context.Response);
                 context.Response.ContentType = "application/octet-stream";
-
-                if (context.Request.HttpMethod == "HEAD")
-                {
-                    context.Response.ContentLength64 = new FileInfo(path).Length;
-                    return;
-                }
-
-                byte[] content = File.ReadAllBytes(path);
                 context.Response.ContentLength64 = content.Length;
                 context.Response.OutputStream.Write(content, 0, content.Length);
             }
@@ -429,6 +391,45 @@ namespace Ijewel3D
             response.AddHeader("Access-Control-Allow-Methods", "*");
             response.AddHeader("Access-Control-Allow-Headers", "*");
             response.AddHeader("Access-Control-Max-Age", "86400");
+        }
+
+        private void HandleHasChangedEndpoint(HttpListenerContext context)
+        {
+            AddCorsHeaders(context.Response);
+
+            // 1) Parse the query string for "force"
+            var queryString = context.Request.Url.Query; // includes leading "?"
+            Dictionary<string, string> parsed = ParseQueryString(queryString);
+
+            bool force = parsed.ContainsKey("force");
+
+            bool hasChanged = RhinoModelObserver.Instance.ModelHasChanged;
+            if (hasChanged || force)
+            {
+                lock (RhinoModelObserver.hasChangedLock)
+                {
+                    if (chosenPort == null)
+                    {
+                        return;
+                    }
+                    
+                    IJewelViewer.ExportModel(RhinoDoc.ActiveDoc, (int)chosenPort);
+                    if (hasChanged)
+                    {
+                        RhinoModelObserver.Instance.ResetModelChangedFlag();
+                    }
+                }
+            }
+
+            bool responseBool = hasChanged || force;
+
+            byte[] responseBytes = System.Text.Encoding.UTF8.GetBytes(responseBool ? "true" : "false");
+
+            context.Response.StatusCode = (int)HttpStatusCode.OK;
+            context.Response.ContentType = "text/plain";
+            context.Response.ContentLength64 = responseBytes.Length;
+            context.Response.OutputStream.Write(responseBytes, 0, responseBytes.Length);
+            context.Response.Close();
         }
 
         private void HandleWhoAmI(HttpListenerContext context)
@@ -642,6 +643,10 @@ namespace Ijewel3D
     {
         private static RhinoModelObserver _instance;
         private static readonly object _lock = new object();
+        public static readonly object hasChangedLock = new object();
+
+
+        private bool _modelHasChanged;
 
         public static RhinoModelObserver Instance
         {
@@ -654,6 +659,12 @@ namespace Ijewel3D
             }
         }
 
+        public bool ModelHasChanged
+        {
+            get { return _modelHasChanged; }
+            set { _modelHasChanged = value; }
+        }
+
         private RhinoModelObserver()
         {
 
@@ -661,8 +672,8 @@ namespace Ijewel3D
             RhinoDoc.DeleteRhinoObject += (s, e) => MarkChanged();
             RhinoDoc.UndeleteRhinoObject += (s, e) => MarkChanged();
             RhinoDoc.ReplaceRhinoObject += (s, e) => MarkChanged();
-            RhinoDoc.ModifyObjectAttributes += (s, e) => MarkObjectAttributesChanged(e);
-            RhinoDoc.BeforeTransformObjects += (s, e) => MarkTransformChanged();
+            RhinoDoc.ModifyObjectAttributes += (s, e) => MarkChanged();
+            RhinoDoc.BeforeTransformObjects += (s, e) => MarkChanged();
             RhinoDoc.MaterialTableEvent += (s, e) => MarkChanged();
             RhinoDoc.LayerTableEvent += (s, e) => MarkChanged();
 
@@ -670,31 +681,15 @@ namespace Ijewel3D
 
         private void MarkChanged()
         {
-            ServerUtility.Active?.QueueModelSnapshot();
+            lock (hasChangedLock)
+            {
+                _modelHasChanged = true;
+            }
         }
 
-        private void MarkObjectAttributesChanged(RhinoModifyObjectAttributesEventArgs e)
+        public void ResetModelChangedFlag()
         {
-            if (e == null)
-            {
-                MarkChanged();
-                return;
-            }
-
-            if (e.OldAttributes.LayerIndex != e.NewAttributes.LayerIndex ||
-                e.OldAttributes.MaterialSource != e.NewAttributes.MaterialSource ||
-                e.OldAttributes.MaterialIndex != e.NewAttributes.MaterialIndex)
-            {
-                ServerUtility.Active?.QueueObjectAttributesSnapshot(e.RhinoObject.Id, e.NewAttributes);
-                return;
-            }
-
-            MarkChanged();
-        }
-
-        private void MarkTransformChanged()
-        {
-            ServerUtility.Active?.QueueTransformSnapshot();
+            _modelHasChanged = false;
         }
     }
 
