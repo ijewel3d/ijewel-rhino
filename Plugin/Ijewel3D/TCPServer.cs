@@ -30,7 +30,7 @@ namespace Ijewel3D
         {
             if (_server != null) return;
 
-            _server = new WebSocketServer($"ws://0.0.0.0:{_port}/ws/model");
+            _server = new WebSocketServer($"ws://127.0.0.1:{_port}/ws/model");
             _server.Start(socket =>
             {
                 var client = new FleckStreamClient(socket);

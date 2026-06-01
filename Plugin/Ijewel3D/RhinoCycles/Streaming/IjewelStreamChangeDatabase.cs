@@ -14,7 +14,7 @@ using System.Threading.Tasks;
 
 namespace Ijewel3D
 {
-    internal sealed class IjewelStreamChangeDatabase : ChangeDatabase
+    public sealed class IjewelStreamChangeDatabase : ChangeDatabase
     {
         private const int StreamDebounceMilliseconds = 500;
         private const int TransformStreamIntervalMilliseconds = 33;
@@ -38,6 +38,11 @@ namespace Ijewel3D
         private long _sequence;
         private StreamFrame _frame;
         private readonly ConcurrentQueue<ObjectAttributeChange> _objectAttributeChanges = new ConcurrentQueue<ObjectAttributeChange>();
+        private readonly object _directApiLock = new object();
+        private readonly Dictionary<Tuple<Guid, int>, CyclesMesh> _directApiMeshes = new Dictionary<Tuple<Guid, int>, CyclesMesh>();
+        private readonly Dictionary<uint, CyclesObject> _directApiObjects = new Dictionary<uint, CyclesObject>();
+        private readonly Dictionary<uint, CyclesObjectShader> _directApiMaterialAssignments = new Dictionary<uint, CyclesObjectShader>();
+        private readonly Dictionary<uint, CyclesObjectTransform> _directApiTransforms = new Dictionary<uint, CyclesObjectTransform>();
 
         private IjewelStreamChangeDatabase(
             Guid pluginId,
@@ -49,6 +54,102 @@ namespace Ijewel3D
             BitmapConverter bitmapConverter)
             : base(pluginId, engine, doc, view, attributes, modal, bitmapConverter)
         {
+        }
+
+        public static IjewelStreamChangeDatabase Current { get; private set; }
+
+        public ObjectDatabase ObjectDatabase => StreamObjectDatabase;
+
+        public ObjectShaderDatabase ObjectShaderDatabase => StreamObjectShaderDatabase;
+
+        public void RememberDirectMesh(CyclesMesh mesh)
+        {
+            if (mesh?.MeshId == null) return;
+
+            lock (_directApiLock)
+            {
+                _directApiMeshes[mesh.MeshId] = CloneMesh(mesh);
+            }
+        }
+
+        public void ForgetDirectMesh(Guid id)
+        {
+            lock (_directApiLock)
+            {
+                var keys = new List<Tuple<Guid, int>>();
+                foreach (var key in _directApiMeshes.Keys)
+                {
+                    if (key.Item1 == id) keys.Add(key);
+                }
+
+                foreach (var key in keys)
+                {
+                    _directApiMeshes.Remove(key);
+                }
+            }
+        }
+
+        public void RememberDirectObject(CyclesObject ob)
+        {
+            if (ob == null) return;
+
+            lock (_directApiLock)
+            {
+                var clone = CloneObject(ob);
+                if (_directApiTransforms.TryGetValue(ob.obid, out var transform))
+                {
+                    clone.Transform = transform.Transform;
+                }
+
+                if (_directApiMaterialAssignments.TryGetValue(ob.obid, out var material))
+                {
+                    ApplyMaterialAssignment(clone, material);
+                }
+
+                _directApiObjects[ob.obid] = clone;
+            }
+        }
+
+        public void ForgetDirectObject(uint obid)
+        {
+            lock (_directApiLock)
+            {
+                _directApiObjects.Remove(obid);
+                _directApiMaterialAssignments.Remove(obid);
+                _directApiTransforms.Remove(obid);
+            }
+        }
+
+        public void RememberDirectMaterialAssignment(CyclesObjectShader assignment)
+        {
+            if (assignment == null) return;
+
+            lock (_directApiLock)
+            {
+                var clone = CloneMaterialAssignment(assignment);
+                _directApiMaterialAssignments[clone.Id] = clone;
+
+                if (_directApiObjects.TryGetValue(clone.Id, out var ob))
+                {
+                    ApplyMaterialAssignment(ob, clone);
+                }
+            }
+        }
+
+        public void RememberDirectTransform(CyclesObjectTransform transform)
+        {
+            if (transform == null) return;
+
+            lock (_directApiLock)
+            {
+                var clone = CloneTransform(transform);
+                _directApiTransforms[clone.Id] = clone;
+
+                if (_directApiObjects.TryGetValue(clone.Id, out var ob))
+                {
+                    ob.Transform = clone.Transform;
+                }
+            }
         }
 
         public static IjewelStreamChangeDatabase Create(RhinoDoc doc)
@@ -65,7 +166,7 @@ namespace Ijewel3D
                 View = view
             };
 
-            return new IjewelStreamChangeDatabase(
+            var database = new IjewelStreamChangeDatabase(
                 pluginId,
                 engine,
                 doc.RuntimeSerialNumber,
@@ -78,6 +179,9 @@ namespace Ijewel3D
                 ModelAngleToleranceRadians = doc.ModelAngleToleranceRadians,
                 ModelUnits = doc.ModelUnitSystem
             };
+
+            Current = database;
+            return database;
         }
 
         public void QueueStream(bool immediate = false, bool full = false)
@@ -149,7 +253,7 @@ namespace Ijewel3D
             }
         }
 
-        public void AddClient(IjewelStreamClient client)
+        internal void AddClient(IjewelStreamClient client)
         {
             if (client == null) throw new ArgumentNullException(nameof(client));
 
@@ -164,7 +268,7 @@ namespace Ijewel3D
             QueueStream(true, true);
         }
 
-        public void RemoveClient(IjewelStreamClient client)
+        internal void RemoveClient(IjewelStreamClient client)
         {
             if (client == null) return;
 
@@ -220,6 +324,11 @@ namespace Ijewel3D
 
                 _disposeTokenSource.Dispose();
                 _streamLock.Dispose();
+
+                if (ReferenceEquals(Current, this))
+                {
+                    Current = null;
+                }
             }
 
             base.Dispose(isDisposing);
@@ -288,16 +397,7 @@ namespace Ijewel3D
                     }
                 }
 
-                _frame.Objects.Add(ob);
-                if (ob.meshid != null)
-                {
-                    StreamObjectDatabase.RecordObjectIdMeshIdRelation(ob.obid, ob.meshid);
-                }
-
-                if (StreamObjectDatabase.FindObjectRelation(ob.obid) == null)
-                {
-                    StreamObjectDatabase.RecordObjectRelation(ob.obid, new ccl.Object());
-                }
+                AddObjectToFrame(ob);
             }
         }
 
@@ -529,6 +629,10 @@ namespace Ijewel3D
                 UploadObjectChanges();
                 UploadObjectAttributeChanges();
                 UploadObjectShaderChanges();
+                if (full)
+                {
+                    AddDirectApiStateToFrame();
+                }
 
                 var json = _frame.ToJson();
                 ResetChangeQueue();
@@ -618,6 +722,106 @@ namespace Ijewel3D
             _frame.Meshes.Add(mesh);
         }
 
+        private void AddObjectToFrame(CyclesObject ob)
+        {
+            if (ob == null) return;
+
+            foreach (var existing in _frame.Objects)
+            {
+                if (existing.obid == ob.obid) return;
+            }
+
+            _frame.Objects.Add(ob);
+            if (ob.meshid != null)
+            {
+                StreamObjectDatabase.RecordObjectIdMeshIdRelation(ob.obid, ob.meshid);
+            }
+
+            if (StreamObjectDatabase.FindObjectRelation(ob.obid) == null)
+            {
+                StreamObjectDatabase.RecordObjectRelation(ob.obid, new ccl.Object());
+            }
+        }
+
+        private void AddMaterialAssignmentToFrame(CyclesObjectShader assignment)
+        {
+            if (assignment == null) return;
+
+            foreach (var existing in _frame.MaterialAssignments)
+            {
+                if (existing.Id == assignment.Id) return;
+            }
+
+            _frame.MaterialAssignments.Add(assignment);
+        }
+
+        private void AddTransformToFrame(CyclesObjectTransform transform)
+        {
+            if (transform == null) return;
+
+            foreach (var existing in _frame.Transforms)
+            {
+                if (existing.Id == transform.Id) return;
+            }
+
+            _frame.Transforms.Add(transform);
+        }
+
+        private void AddDirectApiStateToFrame()
+        {
+            List<CyclesMesh> meshes;
+            List<CyclesObject> objects;
+            List<CyclesObjectShader> materials;
+            List<CyclesObjectTransform> transforms;
+
+            lock (_directApiLock)
+            {
+                meshes = new List<CyclesMesh>(_directApiMeshes.Count);
+                foreach (var mesh in _directApiMeshes.Values)
+                {
+                    meshes.Add(CloneMesh(mesh));
+                }
+
+                objects = new List<CyclesObject>(_directApiObjects.Count);
+                foreach (var ob in _directApiObjects.Values)
+                {
+                    objects.Add(CloneObject(ob));
+                }
+
+                materials = new List<CyclesObjectShader>(_directApiMaterialAssignments.Count);
+                foreach (var material in _directApiMaterialAssignments.Values)
+                {
+                    materials.Add(CloneMaterialAssignment(material));
+                }
+
+                transforms = new List<CyclesObjectTransform>(_directApiTransforms.Count);
+                foreach (var transform in _directApiTransforms.Values)
+                {
+                    transforms.Add(CloneTransform(transform));
+                }
+            }
+
+            foreach (var mesh in meshes)
+            {
+                AddMeshToFrame(mesh);
+            }
+
+            foreach (var ob in objects)
+            {
+                AddObjectToFrame(ob);
+            }
+
+            foreach (var transform in transforms)
+            {
+                AddTransformToFrame(transform);
+            }
+
+            foreach (var material in materials)
+            {
+                AddMaterialAssignmentToFrame(material);
+            }
+        }
+
         private static CyclesMesh CloneMesh(CyclesMesh mesh)
         {
             if (mesh == null) return null;
@@ -634,6 +838,65 @@ namespace Ijewel3D
                 IsSolid = mesh.IsSolid,
                 OcsFrame = mesh.OcsFrame
             };
+        }
+
+        private static CyclesObject CloneObject(CyclesObject ob)
+        {
+            if (ob == null) return null;
+
+            return new CyclesObject
+            {
+                obid = ob.obid,
+                meshid = ob.meshid,
+                Transform = ob.Transform,
+                OcsFrame = ob.OcsFrame,
+                matid = ob.matid,
+                MaterialName = ob.MaterialName,
+                LayerName = ob.LayerName,
+                LayerFullPath = ob.LayerFullPath,
+                MaterialSource = ob.MaterialSource,
+                Visible = ob.Visible,
+                Shader = ob.Shader,
+                CastShadow = ob.CastShadow,
+                IsShadowCatcher = ob.IsShadowCatcher,
+                IsSolid = ob.IsSolid,
+                CastNoShadow = ob.CastNoShadow,
+                Cutout = ob.Cutout,
+                IgnoreCutout = ob.IgnoreCutout
+            };
+        }
+
+        private static CyclesObjectShader CloneMaterialAssignment(CyclesObjectShader assignment)
+        {
+            if (assignment == null) return null;
+
+            return new CyclesObjectShader(assignment.Id)
+            {
+                OldShaderHash = assignment.OldShaderHash,
+                NewShaderHash = assignment.NewShaderHash,
+                MaterialName = assignment.MaterialName,
+                LayerName = assignment.LayerName,
+                LayerFullPath = assignment.LayerFullPath,
+                MaterialSource = assignment.MaterialSource
+            };
+        }
+
+        private static CyclesObjectTransform CloneTransform(CyclesObjectTransform transform)
+        {
+            return transform == null
+                ? null
+                : new CyclesObjectTransform(transform.Id, transform.Transform);
+        }
+
+        private static void ApplyMaterialAssignment(CyclesObject ob, CyclesObjectShader assignment)
+        {
+            if (ob == null || assignment == null) return;
+
+            ob.matid = assignment.NewShaderHash;
+            if (!string.IsNullOrEmpty(assignment.MaterialName)) ob.MaterialName = assignment.MaterialName;
+            if (!string.IsNullOrEmpty(assignment.LayerName)) ob.LayerName = assignment.LayerName;
+            if (!string.IsNullOrEmpty(assignment.LayerFullPath)) ob.LayerFullPath = assignment.LayerFullPath;
+            if (!string.IsNullOrEmpty(assignment.MaterialSource)) ob.MaterialSource = assignment.MaterialSource;
         }
 
         private static float[] CloneArray(float[] values)

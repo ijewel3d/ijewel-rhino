@@ -13,7 +13,7 @@ namespace Ijewel3D
 {
     public class IJewelStream : Rhino.Commands.Command
     {
-        private readonly IjewelStreamServerUtility _streamServer = new IjewelStreamServerUtility();
+        private readonly IjewelStreamServerUtility _streamServer = StreamApi.Server;
         private readonly string _baseUrl = "http://playground.ijewel3d.com/v2-test/?rhino";
 
         public override string EnglishName => "IJewelStream";
@@ -132,6 +132,8 @@ namespace Ijewel3D
         private IjewelStreamChangeDatabase _streamDatabase;
         private IjewelStreamModelObserver _observer;
 
+        public bool IsRunning => _streamDatabase != null;
+
         public void StartModelStream(RhinoDoc doc)
         {
             StopModelStream();
@@ -162,6 +164,7 @@ namespace Ijewel3D
 
             _streamDatabase?.Dispose();
             _streamDatabase = null;
+            chosenPort = null;
         }
 
         private int? FindFreePort()
@@ -182,7 +185,7 @@ namespace Ijewel3D
             TcpListener tcpListener = null;
             try
             {
-                tcpListener = new TcpListener(IPAddress.Loopback, port);
+                tcpListener = new TcpListener(IPAddress.Any, port);
                 tcpListener.Start();
                 return false;
             }
