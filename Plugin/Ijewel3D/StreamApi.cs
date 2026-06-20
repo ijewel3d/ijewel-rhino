@@ -19,7 +19,12 @@ namespace Ijewel3D
 
         public static void Start(RhinoDoc doc)
         {
-            Server.StartModelStream(doc);
+            Start(doc, Ijewel3DPlugin.Instance?.Id ?? Guid.Empty);
+        }
+
+        public static void Start(RhinoDoc doc, Guid pluginId)
+        {
+            Server.StartModelStream(doc, pluginId);
         }
 
         public static void Stop()

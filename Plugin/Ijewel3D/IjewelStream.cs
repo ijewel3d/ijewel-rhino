@@ -136,6 +136,11 @@ namespace Ijewel3D
 
         public void StartModelStream(RhinoDoc doc)
         {
+            StartModelStream(doc, Ijewel3DPlugin.Instance?.Id ?? Guid.Empty);
+        }
+
+        public void StartModelStream(RhinoDoc doc, Guid pluginId)
+        {
             StopModelStream();
 
             chosenPort = FindFreePort();
@@ -145,7 +150,7 @@ namespace Ijewel3D
                 return;
             }
 
-            _streamDatabase = IjewelStreamChangeDatabase.Create(doc);
+            _streamDatabase = IjewelStreamChangeDatabase.Create(doc, pluginId);
             _observer = new IjewelStreamModelObserver(doc, _streamDatabase);
 
             _server = new TCPServer(chosenPort.Value, _streamDatabase);

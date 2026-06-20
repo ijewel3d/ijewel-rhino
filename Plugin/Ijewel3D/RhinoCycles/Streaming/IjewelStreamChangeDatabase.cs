@@ -154,9 +154,13 @@ namespace Ijewel3D
 
         public static IjewelStreamChangeDatabase Create(RhinoDoc doc)
         {
+            return Create(doc, Ijewel3DPlugin.Instance?.Id ?? Guid.Empty);
+        }
+
+        public static IjewelStreamChangeDatabase Create(RhinoDoc doc, Guid pluginId)
+        {
             if (doc == null) throw new ArgumentNullException(nameof(doc));
 
-            var pluginId = Ijewel3DPlugin.Instance?.Id ?? Guid.Empty;
             var view = doc.Views.ActiveView != null
                 ? new ViewInfo(doc.Views.ActiveView.ActiveViewport)
                 : new ViewInfo(doc.RuntimeSerialNumber);
